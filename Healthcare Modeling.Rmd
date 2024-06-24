@@ -1,0 +1,473 @@
+---
+title: "Homework 4 – Healthcare Modeling"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library(tidyverse)
+library(caTools)
+library(glmnet)
+library(glmnetUtils)
+library(ROCR)
+library(randomForest)
+library(mice)
+library(rpart)
+library(rpart.plot)
+library(reshape2)
+```
+
+
+
+
+```{r}
+
+dat = read.csv("nhanes-diabetes-final.csv", stringsAsFactors = T)
+
+```
+
+
+
+Part 1: Understanding the data
+
+
+a) How many individuals are there in the data set?
+
+```{r}
+
+paste0(nrow(dat), ' individuals are there in the data set.')
+
+```
+
+
+b) What fraction of individuals have diabetes?
+
+```{r}
+
+paste0('The fraction of individuals who have diabetes is ', (sum(dat$Diabetes == 1) / nrow(dat)), '.')
+
+```
+
+
+
+c) Which level of education is associated with the highest risk of diabetes? Which is associated with the lowest risk?
+
+
+```{r}
+
+edu_diabetes_tbl <- table(dat[c("Education", "Diabetes")])
+
+frac_all <- c()
+
+for (i in 1:nrow(edu_diabetes_tbl)) {
+  frac_i = edu_diabetes_tbl[i+5] / (edu_diabetes_tbl[i] + edu_diabetes_tbl[i+5])
+  frac_all = c(frac_all, frac_i)
+}
+
+index_max <- which.max(frac_all)
+index_min <- which.min(frac_all)
+
+paste0(rownames(edu_diabetes_tbl)[index_max], ' is associated with the highest risk of diabetes.')
+paste0(rownames(edu_diabetes_tbl)[index_min], ' is associated with the highest risk of diabetes.')
+
+
+```
+
+
+
+d) Obesity is defined as an individual having a body mass index (BMI; weight in kilograms divided by height in meters squared) of over 30. Based on the data, is obesity a risk factor for diabetes?
+
+
+```{r}
+
+dat$BMI <- dat$Weight / (dat$Height/100)**2
+
+hi_bmi <- dat[dat$BMI > 30, ]
+hi_bmi_tbl <- table(hi_bmi[c("Diabetes")])
+
+lo_bmi <- dat[dat$BMI < 30, ]
+lo_bmi_tbl <- table(lo_bmi[c("Diabetes")])
+
+paste0('The fraction of diabetes is much smaller among those with lower BMIs than among those with higher BMIs, so obesity is a risk factor for diabetes. ', round((lo_bmi_tbl[2] / (lo_bmi_tbl[1] + lo_bmi_tbl[2]) * 100), 2), '% individuals with lower BMIs have diabetes, while ', round((hi_bmi_tbl[2] / (hi_bmi_tbl[1] + hi_bmi_tbl[2]) * 100), 2), '% people with higher BMIs have diabetes.')
+
+```
+
+
+
+Part 2: A first logistic regression model
+Next, we will develop an initial predictive model. Set your seed to 40 and split the data randomly
+into a training and a testing set. Use a 70-30 split and ensure that the relative proportion of the two
+levels of the dependent variable is preserved in the two sets. Estimate a logistic regression model
+from the training set using only the gender, age, household income and home ownership variables.
+Answer the following questions:
+
+a) Which variables are statistically significant at the α = 0.05 level? (For categorical variables, include the variable if at least one of its dummy variables is significant.)
+
+```{r}
+
+dat <- dat[, -29]
+
+set.seed(40)
+
+spl = sample.split(dat$Diabetes, SplitRatio = 0.7)
+
+dat.train = subset(dat, spl == TRUE)
+dat.test = subset(dat, spl == FALSE)
+
+dat.glm.first = glm(Diabetes ~ Gender + Age + HHIncome + HomeOwn, 
+                    data = dat.train, 
+                    family = "binomial")
+
+summary(dat.glm.first)
+
+```
+
+
+Variables Gender, Age, and HomeOwn are statistically significant at the α = 0.05 level. 
+
+
+b) Consider a 50 year old man who lives in a rented apartment, with a household income of $66,000. What are the log-odds of him having diabetes? What is the predicted probability of him having diabetes?
+
+
+```{r}
+
+log_odds <- unname(dat.glm.first$coefficients[1] + (dat.glm.first$coefficients[3] * 50) + dat.glm.first$coefficients[2] + dat.glm.first$coefficients[16] + dat.glm.first$coefficients[12])
+paste0('The log-odds of him having diabetes are ', log_odds, '.')
+
+pred_prob <- predict(
+                dat.glm.first, 
+                newdata=data.frame(Gender='male', 
+                                   Age=50, 
+                                   HHIncome='65000-74999', 
+                                   HomeOwn='Rent'), 
+                type="response"
+                )
+paste0('The predicted probability of him having diabetes are ', pred_prob, '.')
+
+```
+
+
+
+
+Part 3: A richer logistic regression model
+Now, estimate a logistic regression model using all of the independent variables. Use the same
+training and testing sets from Part 2. Answer the following questions:
+
+a) Use the model to make predictions on the test set. Use a threshold of 0.5. What is the test set accuracy of the model?
+
+```{r}
+
+dat.glm.all = glm(
+  Diabetes ~ ., 
+  data=dat.train, 
+  family="binomial"
+)
+
+dat.predict.all = predict(dat.glm.all, newdata=dat.test, type="response")
+
+# Confusion matrix
+confMat = table(dat.test$Diabetes, dat.predict.all > 0.5)
+
+# Calculate the accuracy:
+accuracy = sum( diag(confMat)) / nrow(dat.test)
+paste0('The test set accuracy of the model is ', accuracy, '.')
+
+```
+
+
+
+b) You show your model to a stakeholder at the healthcare provider who does not understand machine learning very well. When they see the result in (a), they become very excited. Explain why this excitement is unwarranted.
+
+
+```{r}
+
+baseline_accuracy = table(dat.test$Diabetes)[1] / (table(dat.test$Diabetes)[1] + table(dat.test$Diabetes)[2])
+
+paste0('The baseline accuracy of the model is ', baseline_accuracy, ', which is lower than the test set accuracy.')
+
+paste0('However, this excitement is unwarranted because the test dataset is relatively unbalanced, with only ', (1-baseline_accuracy)*100, '% of the observations')
+
+```
+
+
+
+
+c) In class, we discussed another metric for quantifying predictive performance of classification models. What is that metric? What is the value of that metric for this model? Explain why this metric is more appropriate to use for this problem.
+
+The metric is sensitivity: True Positives / (True Positives + False Negatives)
+
+```{r}
+
+TP <- confMat[2,2]
+FN <- confMat[2,1]
+
+sensitivity <- TP / (TP + FN)
+paste0('The value of the metric for this model is ', sensitivity, '.')
+
+```
+
+
+This metric is more appropriate to use for this problem because, in the context of healthcare, it is crucial not to miss any patients who truly have diabetes, ensuring they receive prompt care.
+
+
+d) Besides the difference in the number of variables, and notwithstanding the difference in test set performance between this model and the model in Part 2, why might the healthcare provider prefer the model in Part 2?
+
+The healthcare provider might prefer the model in Part 2 because the model is potentially less prone to over-fitting, more cost-efficient in terms of computing performance and data collection, and more accessible for healthcare providers due to its simplicity and ease of understanding.
+
+
+
+Part 4: A smaller logistic regression model
+Next, estimate a L1-regularized (LASSO) logistic regression model to obtain a logistic regression
+smaller than the one in Part 3. Use five-fold cross validation, and set your random number seed
+to 2000 beforehand. Use the same training and testing sets from Part 2. For all of the questions
+below, use s = "lambda.min" when accessing predictions or coefficients.
+
+a) How many variables does your model use?
+
+```{r}
+
+set.seed(2000)
+
+dat.glm.small = cv.glmnet( Diabetes ~ ., data = dat.train, family = "binomial", nfolds = 5, standardize = TRUE)
+
+lasso.coeffs.min = coefficients(dat.glm.small, s = "lambda.min")
+
+dat.test.predict = predict( dat.glm.small, newdata = dat.test, type = "response", s = "lambda.min" )
+
+paste0('My model uses ', length(rownames(lasso.coeffs.min)[ which(lasso.coeffs.min != 0)]) - 1, ' variables, counting each dummy variables separately.')
+
+```
+
+
+
+b) What is the test set accuracy of your model? (Use a threshold of 0.5.)
+
+
+```{r}
+
+confMat = table( dat.test$Diabetes, dat.test.predict > 0.5 )
+
+accuracy = sum( diag(confMat)) / nrow(dat.test)
+paste0('The test set accuracy of my model is ', accuracy, '.')
+
+```
+
+
+
+c) What is the test set AUC of your model?
+
+
+```{r}
+
+ROCpred = prediction(dat.test.predict, dat.test$Diabetes)
+ROCperf = performance(ROCpred, "tpr", "fpr")
+
+plot(ROCperf, main = "Receiver Operator Characteristic Curve")
+
+```
+
+
+```{r}
+
+AUC = as.numeric(performance(ROCpred, "auc")@y.values)
+paste0('The test set AUC of my model is ', AUC, '.')
+
+```
+
+
+
+
+Part 5: A random forest model
+Next, let’s develop a better model. Set the seed to 2000 beforehand, and estimate a random forest model. Use the randomForest package in R (do not give the additional input parameter importance = TRUE). Use all of the independent variables.
+
+a) What is the test set accuracy of your model? Use a threshold of 0.5.
+
+
+```{r}
+
+set.seed(2000)
+
+dat.rf = randomForest( as.factor(Diabetes) ~ ., data = dat.train)
+
+dat.test.predict = predict( dat.rf, newdata = dat.test, type = "prob")
+dat.test.predict = dat.test.predict[,2]
+
+confMat = table( dat.test$Diabetes, dat.test.predict > 0.5 )
+accuracy = sum( diag(confMat)) / nrow(dat.test)
+paste0('The test set accuracy of my model is ', accuracy, '.')
+
+```
+
+
+
+
+
+b) What is the test set AUC of your model?
+
+
+```{r}
+
+ROCpred = prediction(dat.test.predict, dat.test$Diabetes)
+ROCperf = performance(ROCpred, "tpr", "fpr")
+plot(ROCperf, main = "Receiver Operator Characteristic Curve")
+
+```
+
+
+
+```{r}
+
+AUC = as.numeric(performance(ROCpred, "auc")@y.values)
+paste0('The test set AUC of my model is ', AUC, '.')
+
+```
+
+
+
+
+c) Compare your answers in (a) and (b) to your answers in Part 3 and Part 4. What does the difference in performance imply about the underlying relationship between the independent variables and the risk of diabetes?
+
+My answers in (a) and (b) have higher accuracy and AUC than my answers in Part 3 and Part 4. The difference in performance imply that the underlying relationship between the independent variables and the risk of diabetes is non-linear because random forest models performs better with non-linear data.
+
+
+
+d) Calculate the sensitivity and the specificity of the model at a threshold of 0.20.
+
+
+```{r}
+
+confMat = table( dat.test$Diabetes, dat.test.predict > 0.20 )
+
+TP <- confMat[2,2]
+FN <- confMat[2,1]
+
+sensitivity <- TP / (TP + FN)
+paste0('The sensitivity of the model is ', sensitivity, '.')
+
+TN <- confMat[1,1]
+FP <- confMat[1,2]
+
+specificity <- TN / (TN + FP)
+paste0('The specificity of the model is ', specificity, '.')
+
+```
+
+
+
+
+
+e) Suppose that the random forest model, at a threshold of 0.20, were to be used for a new population of patients for which it is known that 10% of the patients have diabetes. (Note that this is different from the current data set.) Based on your answer to (d), what accuracy would you expect the model to have in this new population of patients?
+
+
+
+```{r}
+
+exp_accuracy <- 0.1*sensitivity + 0.9*specificity
+
+paste0('I would expect the model to have an accuracy of ', exp_accuracy, ' in this new population of patients.')
+
+```
+
+
+
+
+
+Part 6: Operationalizing the model
+Suppose that the healthcare provider is interested in using your random forest model to identify
+individuals in the test set to screen for diabetes. The healthcare provider has collected the independent variables listed on page 1 for those individuals, but does not know whether these individuals have diabetes or not.
+
+a) How could you use the predictions of your random forest model to make this decision?
+
+Using the the predictions of my random forest model, I can predict whether a patient is likely to develop diabetes, and for those at higher risk, I can recommend a follow-up exam.
+
+
+b) Suppose the healthcare provider will enroll 150 individuals from the test set. Based on your answer to (a), determine this set of individuals. How many of these individuals actually have diabetes?
+
+
+```{r}
+
+sorted_indices <- order(dat.test.predict, decreasing = TRUE)
+
+rf_preds <- data.frame(
+  idx = sorted_indices,
+  prob = dat.test.predict[sorted_indices]
+)
+
+rf_preds_test <- dat.test[rf_preds[1:150,]$idx,]
+
+cnt_diabetes <- sum(rf_preds_test$Diabetes==1)
+
+paste0(cnt_diabetes, ' of these individuals actually have diabetes.')
+
+```
+
+
+
+c) Suppose that instead of using your model, the healthcare provider selects the 150 individuals
+from the test set at random. Simulate this selection policy 100 times. Averaging over the 100
+repetitions, how many of the 150 selected individuals have diabetes? 
+
+```{r}
+
+cnts_diabetes <- c() 
+
+# Simulate 100 times
+for (i in 1:100) {
+
+  indices = sample(c(1:nrow(dat.test)), 150, replace = FALSE)
+  selected <- dat.test[indices, ]
+  
+  cnt_diabetes <- sum(selected$Diabetes == 1)
+  
+  cnts_diabetes <- append(cnts_diabetes, cnt_diabetes)
+  
+}
+
+paste0('Averaging over the 100 repetitions, ', mean(cnts_diabetes), ' of the 150 selected individuals have diabetes.')
+
+```
+
+
+
+d) Comparing your answers to (b) and (c), is the model useful? Explain your answer.
+
+The model is useful because my answers to (b) is much larger than (c), which means the model captures more.
+
+
+e) How does your answer to part (b) change if you use the model in Part 4 of this question? Is your answer lower or higher than part (b)? Explain why this makes sense.
+
+```{r}
+
+set.seed(2000)
+
+dat.glm.small = cv.glmnet( Diabetes ~ ., data = dat.train, family = "binomial", nfolds = 5, standardize = TRUE)
+
+lasso.coeffs.min = coefficients(dat.glm.small, s = "lambda.min")
+
+dat.test.predict = predict( dat.glm.small, newdata = dat.test, type = "response", s = "lambda.min" )
+
+sorted_indices <- order(dat.test.predict, decreasing = TRUE)
+
+rf_preds <- data.frame(
+  idx = sorted_indices,
+  prob = dat.test.predict[sorted_indices]
+)
+
+rf_preds_test <- dat.test[rf_preds[1:150,]$idx,]
+
+cnt_diabetes <- sum(rf_preds_test$Diabetes==1)
+
+paste0(cnt_diabetes, ' of these individuals actually have diabetes.')
+
+```
+
+My answer to part (b) is lower if I use the model in Part 4 of this question. This makes sense because Lasso Lasso regression often predicts lower values than Random Forest due to its linear nature and regularization leading to higher bias and potential underfitting, whereas Random Forest captures complex, non-linear relationships, resulting in more accurate and sometimes higher predictions.
+
+
+
+
+
+
+
+
+
